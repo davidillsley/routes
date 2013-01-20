@@ -1,0 +1,11 @@
+core/.cache
+macros/.cache
+core/.classpath
+core/.project
+core/target/
+macros/.classpath
+macros/.project
+macros/target/
+project/project/
+project/target/
+target/
