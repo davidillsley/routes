@@ -16,22 +16,26 @@ trait Core {
 
 trait TestResource extends Routes with Core {
   implicit val wPayment: Writeable[Payment] = Writeable(_ => new HttpResponse {}, None)
-  implicit val wListPayment: Writeable[List[Payment]] = Writeable(_ => new HttpResponse {}, None)
+  implicit def wListPayment[T](implicit f: Writeable[T]): Writeable[List[T]] = Writeable(_ => new HttpResponse {}, None)
+
+  def passwordCheck(username: String, password: String) = username == password
+
+  val passwordFilter = basicAuth(passwordCheck)
 
   val g = get("")
-  val h = get("/path/a:Int/something-else")
-  val hh = get("/path/a:Int/something-else?l=Int")
-  val i = get("/path/a:Int/b:String")
+  val h = get("/path/{a:Int}/something-else")
+  val i = get("/path/{a:Int}/something-else", "l:String")
+  val j = get("/path/{a:Int}/{b:String}")
 
   val paymentsRoute = get("/payments").mapped(payments)
 
-  val paymentRoute = get("/payment/a:Int").mapped(payment)
+  val paymentRoute = get("/payment/{a:Int}").mapped(payment)
 
   def ext(req: HttpRequest) = Right(1)
 
   val q = get("/purchases").wth(ext).mapped(purchase)
-  val r = get("/purchases/productCode:Int?page=Int").mapped(purchases)
-  val s = get("/purchases/productCode:Int?page=Int").raw(purchasesRaw)
+  val r = get("/purchases/{productCode:Int}", "page:Int").mapped(purchases)
+  val s = get("/purchases/{productCode:Int}", "page:Int").raw(purchasesRaw)
 }
 
 trait WebAppRoutes {
@@ -47,7 +51,10 @@ abstract class WebApp {
 object Test extends App {
 
   trait WR extends WebAppRoutes with TestResource {
-    val routes = List(q, r, s, paymentRoute, paymentsRoute)
+    val secured = List(q).map(_.fltr(passwordFilter))
+    val unsecured = List(r, s, paymentRoute, paymentsRoute)
+    
+    val routes = unsecured ++ secured
   }
 
   val wa = new WebApp with WR

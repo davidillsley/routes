@@ -6,6 +6,7 @@ import scala.annotation.implicitNotFound
 import scala.concurrent.Future
 import scala.util.Try
 import scala.concurrent.ExecutionContext
+import sun.misc.BASE64Decoder
 
 @implicitNotFound(
   "Cannot write an instance of ${A} to HTTP response. Try to define a Writeable[${A}]")
@@ -14,6 +15,11 @@ case class Writeable[-A](transform: (A => HttpResponse), contentType: Option[Str
 }
 
 trait HttpRequest {
+  def uri: String
+  def path: String
+  def query: String
+
+  def headers: List[(String, String)]
 
 }
 
@@ -22,10 +28,20 @@ trait HttpResponse {
 }
 
 trait Route {
+  def fltr(f: HttpRequest => Either[HttpResponse, HttpRequest]): Route
 }
 
 class RouteImpl(route: String, f: HttpRequest => Future[HttpResponse]) extends Route {
   override def toString = route
+
+  def fltr(f2: HttpRequest => Either[HttpResponse, HttpRequest]) = {
+    new RouteImpl(route, { request =>
+      f2(request) match {
+        case Left(httpResponse) => Future.successful(httpResponse)
+        case Right(t) => f(t)
+      }
+    })
+  }
 }
 
 trait Partial
@@ -131,12 +147,30 @@ trait Routes {
   implicit val wBytes: Writeable[Array[Byte]] = Writeable(_ => new HttpResponse {}, None)
   implicit val wUnit: Writeable[Unit] = Writeable(_ => new HttpResponse {}, None)
 
-  def get(path: String) = macro Routes.get_impl
+  def basicAuth(f: (String, String) => Boolean) = {
+    def check(request: HttpRequest): Either[HttpResponse, HttpRequest] = {
+      val success =
+        request.headers.find {
+          case (headerName, _) => headerName == "Authorization"
+        }.exists {
+          case (_, headerValue) =>
+            val decoded = new String(new BASE64Decoder().decodeBuffer(headerValue))
+            val sections = decoded.split(':')
+            val username = sections(0)
+            val password = sections(1)
+            f(username, password)
+        }
+      if (success) Right(request) else Left(new HttpResponse {})
+    }
+    check _
+  }
+
+  def get(path: String, params: String*) = macro Routes.get_impl2
 }
 
 object Routes {
 
-  def get_impl(c: Context)(path: c.Expr[String]): c.universe.Expr[_ <: Partial] = {
+  def get_impl2(c: Context)(path: c.Expr[String], params: c.Expr[String]*): c.universe.Expr[_ <: Partial] = {
     import c.universe._
 
     val pathString = path.tree match {
@@ -144,33 +178,32 @@ object Routes {
       case _ => c.abort(c.enclosingPosition, "query isn't a string literal")
     }
 
-    val o = reify { x: String => x.toInt }
+    val a = "\\{.*?\\}".r
+    val pathComponents = a.findAllIn(pathString)
+      .toList
+      .map(_.stripPrefix("{").stripSuffix("}"))
+      .map(parseTag(c)(_))
 
-    val components = PathParser.parse(pathString)
-      .filter(_.isInstanceOf[Param])
-      .map(_.asInstanceOf[Param])
-      .map {
-        pathParam =>
-          pathParam.typ match {
-            case "Int" => (c.typeTag[Int], reify[String => Int] { (x: String) => x.toInt })
-            case "String" => (c.typeTag[String], reify[String => String] { x: String => x })
-            case _ => c.abort(c.enclosingPosition, "unsupported types")
-          }
-      }
+    val queryComponents = params.map(_.tree match {
+      case (Literal(Constant(tag: String))) => parseTag(c)(tag)
+      case _ => c.abort(c.enclosingPosition, "path component isn't a string literal")
+    })
 
-    def p[T:WeakTypeTag](implicit evd: WeakTypeTag[T]): c.Expr[String => T] = {
-      if( evd == c.typeTag[Int])  reify[String => Int] { (x: String) => x.toInt }.asInstanceOf[c.Expr[String => T]]
-      else if( evd == c.typeTag[String])  reify[String => String] { x: String => x }.asInstanceOf[c.Expr[String => T]]
-      else  c.abort(c.enclosingPosition, "unsupported types")
+    val components = pathComponents ++ queryComponents
+
+    def p[T: WeakTypeTag](implicit evd: WeakTypeTag[T]): c.Expr[String => T] = {
+      if (evd == c.typeTag[Int]) reify[String => Int] { (x: String) => x.toInt }.asInstanceOf[c.Expr[String => T]]
+      else if (evd == c.typeTag[String]) reify[String => String] { x: String => x }.asInstanceOf[c.Expr[String => T]]
+      else c.abort(c.enclosingPosition, "unsupported types")
     }
 
     def genRes(path: c.Expr[String]) =
       reify { new PRImpl(path.splice) }
-    def genRes1[T: WeakTypeTag](path: c.Expr[String]): c.universe.Expr[PR1[T]] ={
+    def genRes1[T: WeakTypeTag](path: c.Expr[String]): c.universe.Expr[PR1[T]] = {
       val f = p[T]
       reify { new PR1Impl[T](path.splice, f.splice) }
     }
-    def genRes2[T: WeakTypeTag, U: WeakTypeTag](path: c.Expr[String]): c.universe.Expr[PR2[T, U]] ={
+    def genRes2[T: WeakTypeTag, U: WeakTypeTag](path: c.Expr[String]): c.universe.Expr[PR2[T, U]] = {
       val f = p[T]
       val f2 = p[U]
       reify { new PR2Impl[T, U](path.splice, f.splice, f2.splice) }
@@ -178,9 +211,22 @@ object Routes {
 
     components.size match {
       case 0 => genRes(path)
-      case 1 => genRes1(path)(components.head._1)
-      case 2 => genRes2(path)(components.head._1, components.last._1)
+      case 1 => genRes1(path)(components.head)
+      case 2 => genRes2(path)(components.head, components.last)
       case _ => c.abort(c.enclosingPosition, "too many variable components")
+    }
+  }
+
+  def parseTag(c: Context)(tag: String) = {
+    val elts = tag.split(':')
+    elts.length match {
+      case 1 => c.typeTag[String]
+      case 2 => elts(1) match {
+        case "Int" => c.typeTag[Int]
+        case "String" => c.typeTag[String]
+        case _ => c.abort(c.enclosingPosition, "unsupported types")
+      }
+      case x => c.abort(c.enclosingPosition, "component has wrong number of parts: " + x)
     }
   }
 }
