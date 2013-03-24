@@ -12,6 +12,7 @@ trait Core {
   def payments() = {
     (1 to 10).map(x => Payment(x.toString)).toList
   }
+  def another(id: Int, bodyParam: String) = {}
 }
 
 trait TestResource extends Routes with Core {
@@ -25,7 +26,17 @@ trait TestResource extends Routes with Core {
   val g = get("")
   val h = get("/path/{a:Int}/something-else")
   val i = get("/path/{a:Int}/something-else", "l:String")
+  val pi = post("/path/{a:Int}/something-else", "l:String")
+  
+  val pj =
+    post("/path/something-else")
+      .wth(_ => Right(Payment("")))
+      .mapped(x => x)
+
   val j = get("/path/{a:Int}/{b:String}")
+  val k = get("/path/{a:Int}/{b:Option[Int]}")
+
+  val pir = pi.mapped(another)
 
   val paymentsRoute = get("/payments").mapped(payments)
 
@@ -52,8 +63,8 @@ object Test extends App {
 
   trait WR extends WebAppRoutes with TestResource {
     val secured = List(q).map(_.fltr(passwordFilter))
-    val unsecured = List(r, s, paymentRoute, paymentsRoute)
-    
+    val unsecured = List(r, s, paymentRoute, paymentsRoute, pir)
+
     val routes = unsecured ++ secured
   }
 
